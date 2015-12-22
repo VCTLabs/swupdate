@@ -107,6 +107,27 @@ static int update_uboot_env(void)
 	return ret;
 }
 
+int install_single_image(struct img_type *img)
+{
+	struct installer_handler *hnd;
+	int ret;
+
+	hnd = find_handler(img);
+	if (!hnd) {
+		TRACE("Image Type %s not supported", img->type);
+		return -1;
+	}
+	TRACE("Found installer for stream %s %s", img->fname, hnd->desc);
+
+	/* TODO : check callback to push results / progress */
+	ret = hnd->installer(img, hnd->data);
+	if (ret != 0) {
+		TRACE("Installer for %s not successful !",
+			hnd->desc);
+	}
+
+	return ret;
+}
 
 /*
  * streamfd: file descriptor if it is required to extract
@@ -118,14 +139,10 @@ int install_images(struct swupdate_cfg *sw, int fdsw, int fromfile)
 {
 	int ret;
 	struct img_type *img;
-	struct installer_handler *hnd;
 	char filename[64];
-	struct stat buf;
 	struct filehdr fdh;
+	struct stat buf;
 
-#ifdef CONFIG_MTD
-	mtd_cleanup();
-#endif
 	/* Extract all scripts, preinstall scripts must be run now */
 	if (fromfile) {
 		ret = extract_script(fdsw, &sw->scripts, TMPDIR);
@@ -141,9 +158,7 @@ int install_images(struct swupdate_cfg *sw, int fdsw, int fromfile)
 		ERROR("execute preinstall scripts failed");
 		return ret;
 	}
-#ifdef CONFIG_MTD
-	scan_mtd_devices();
-#endif
+
 	/* Update u-boot environment */
 	ret = prepare_uboot_script(sw, UBOOT_SCRIPT);
 	if (ret) {
@@ -152,12 +167,13 @@ int install_images(struct swupdate_cfg *sw, int fdsw, int fromfile)
 
 
 	LIST_FOREACH(img, &sw->images, next) {
-		hnd = find_handler(img);
-		if (!hnd) {
-			TRACE("Image Type %s not supported", img->type);
-			return -1;
-		}
-		TRACE("Found installer for stream %s %s", img->fname, hnd->desc);
+		/*
+		 *  If image is flagged to be installed from stream
+		 *  it  was already installed by loading the
+		 *  .swu image and it is skipped here.
+		 */
+		if (img->install_directly)
+			continue;
 
 		if (!fromfile) {
 			snprintf(filename, sizeof(filename), "%s%s", TMPDIR, img->fname);
@@ -183,20 +199,15 @@ int install_images(struct swupdate_cfg *sw, int fdsw, int fromfile)
 			img->fdin = fdsw;
 		}
 
-/* TODO : check callback to push results / progress */
-		ret = hnd->installer(img, hnd->data);
-		if (ret != 0) {
-			TRACE("Installer for %s not successful !",
-				hnd->desc);
-			break;
-		}
+		ret = install_single_image(img);
 
 		if (!fromfile)
 			close(img->fdin);
-	}
 
-	if (ret)
-		return ret;
+		if (ret)
+			return ret;
+
+	}
 
 	ret = run_prepost_scripts(sw, POSTINSTALL);
 	if (ret) {
